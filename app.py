@@ -275,6 +275,7 @@ def index():
 @app.route('/api/highlight', methods=['POST'])
 def highlight():
     """高亮显示目标文本API"""
+    filepath_abs = None  # 用于跟踪文件路径，确保在异常时也能清理
     try:
         # 检查是否有文件
         if 'image' not in request.files:
@@ -307,13 +308,36 @@ def highlight():
         # 保存上传的文件
         filename = secure_filename(file.filename)
         unique_filename = f"{uuid.uuid4()}_{filename}"
-        filepath = os.path.join(app.config['UPLOAD_FOLDER'], unique_filename)
-        file.save(filepath)
+        # 使用绝对路径，确保在Windows上正常工作
+        upload_folder = os.path.abspath(app.config['UPLOAD_FOLDER'])
+        os.makedirs(upload_folder, exist_ok=True)
+        filepath = os.path.join(upload_folder, unique_filename)
+        filepath_abs = os.path.abspath(filepath)
         
-        # 读取图片
-        image = cv2.imread(filepath)
-        if image is None:
-            return jsonify({'error': '无法读取图片文件'}), 400
+        # 保存文件
+        try:
+            file.save(filepath_abs)
+        except Exception as e:
+            return jsonify({'error': f'保存文件失败: {str(e)}'}), 500
+        
+        # 确保文件存在
+        if not os.path.exists(filepath_abs):
+            return jsonify({'error': '文件保存失败，文件不存在'}), 500
+        
+        # 读取图片 - 使用绝对路径，确保Windows兼容性
+        # 使用numpy读取图片，避免OpenCV路径问题
+        try:
+            image = cv2.imread(filepath_abs)
+            if image is None:
+                # 如果cv2.imread失败，尝试使用PIL
+                from PIL import Image
+                pil_image = Image.open(filepath_abs)
+                image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+        except Exception as e:
+            return jsonify({'error': f'读取图片文件失败: {str(e)}'}), 500
+        
+        if image is None or image.size == 0:
+            return jsonify({'error': '无法读取图片文件，文件可能已损坏'}), 400
         
         # 初始化OCR（如果需要）
         init_ocr(languages)
@@ -333,9 +357,6 @@ def highlight():
         keyword_images = {}
         for keyword, keyword_image in images_by_keyword.items():
             keyword_images[keyword] = image_to_base64(keyword_image)
-        
-        # 清理临时文件
-        os.remove(filepath)
         
         # 按关键字组织匹配结果
         keyword_results = {}
@@ -371,7 +392,19 @@ def highlight():
         })
     
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        import traceback
+        error_msg = str(e)
+        traceback.print_exc()  # 打印完整错误堆栈，便于调试
+        return jsonify({'error': f'处理失败: {error_msg}'}), 500
+    
+    finally:
+        # 确保清理临时文件
+        if filepath_abs and os.path.exists(filepath_abs):
+            try:
+                os.remove(filepath_abs)
+            except Exception as e:
+                # 文件删除失败不影响结果返回，只记录警告
+                print(f"警告: 无法删除临时文件 {filepath_abs}: {str(e)}")
 
 
 @app.route('/api/health', methods=['GET'])
